@@ -1,105 +1,107 @@
 package main
 
 import (
-	"crypto/md5"
-	"encoding/hex"
-	"encoding/json"
+	"context"
 	"fmt"
 	"log"
 	"net/http"
-	"sync"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/gorilla/mux"
+	"github.com/joho/godotenv"
+	"github.com/somepgs/url-shortener/internal/handlers"
+	"github.com/somepgs/url-shortener/internal/service"
+	"github.com/somepgs/url-shortener/internal/storage"
 )
 
-// Временное хранилище в памяти (потом заменим на БД)
-type Storage struct {
-	urls map[string]string
-	mu   sync.RWMutex
-}
-
-func NewStorage() *Storage {
-	return &Storage{
-		urls: make(map[string]string),
-	}
-}
-
-// Структура запроса
-type ShortenRequest struct {
-	URL string `json:"url"`
-}
-
-// Структура ответа
-type ShortenResponse struct {
-	ShortURL string `json:"short_url"`
-}
-
-var storage = NewStorage()
-
 func main() {
-	// Регистрируем хендлеры
-	http.HandleFunc("/shorten", shortenHandler)
-	http.HandleFunc("/", redirectHandler)
+	// Загружаем переменные окружения
+	if err := godotenv.Load(); err != nil {
+		log.Println("No .env file found")
+	}
 
-	fmt.Println("Server starting on :8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	// Получаем DSN для БД
+	dsn := os.Getenv("DB_DSN")
+	if dsn == "" {
+		log.Fatal("DB_DSN is required")
+	}
+
+	// Инициализируем storage
+	store, err := storage.NewPostgresStorage(dsn)
+	if err != nil {
+		log.Fatal("Failed to connect to database:", err)
+	}
+
+	defer func() {
+		if cerr := store.Close(); err != nil {
+			log.Printf("Failed to close database: %v", cerr)
+		}
+	}()
+
+	// Инициализируем service
+	urlService := service.NewUrlService(store)
+
+	// Инициализируем handlers
+	urlHandler := handlers.NewURLHandler(urlService)
+
+	// Настраиваем роутер
+	r := mux.NewRouter()
+	r.HandleFunc("/shorten", urlHandler.Shorten).Methods("POST")
+	r.HandleFunc("/{code}", urlHandler.Redirect).Methods("GET")
+	r.HandleFunc("/", homeHandler).Methods("GET")
+
+	// Middleware для логирования
+	r.Use(loggingMiddleware)
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	srv := &http.Server{
+		Addr:         ":" + port,
+		Handler:      r,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	// Запуск сервера в отдельной горутине
+	go func() {
+		log.Printf("Server starting on port %s\n", port)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("listen: %v", err)
+		}
+	}()
+
+	// Ожидаем сигнал завершения
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+
+	<-stop
+	log.Println("Shutting down...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Fatalf("server shutdown error: %v", err)
+	}
+	log.Println("Server stopped")
 }
 
-// Хендлер для создания короткой ссылки
-func shortenHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req ShortenRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	// Простая валидация
-	if req.URL == "" {
-		http.Error(w, "URL is required", http.StatusBadRequest)
-		return
-	}
-
-	// Генерируем короткий код (пока просто MD5 и берем первые 6 символов)
-	hash := md5.Sum([]byte(req.URL))
-	shortCode := hex.EncodeToString(hash[:])[:6]
-
-	// Сохраняем
-	storage.mu.Lock()
-	storage.urls[shortCode] = req.URL
-	storage.mu.Unlock()
-
-	// Отправляем ответ
-	resp := ShortenResponse{
-		ShortURL: fmt.Sprintf("http://localhost:8080/%s", shortCode),
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+func homeHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html")
+	fmt.Fprint(w, `
+		<h1>URL Shortener</h1>
+		<p>POST /shorten with {"url": "https://example.com"} to create short URL</p>`)
 }
 
-// Хендлер для редиректа
-func redirectHandler(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/" {
-		fmt.Fprint(w, "URL Shortener Service")
-		return
-	}
-
-	// Получаем код из URL
-	shortCode := r.URL.Path[1:] // убираем первый слэш
-
-	// Ищем оригинальный URL
-	storage.mu.RLock()
-	originalURL, exists := storage.urls[shortCode]
-	storage.mu.RUnlock()
-
-	if !exists {
-		http.NotFound(w, r)
-		return
-	}
-
-	// Редиректим
-	http.Redirect(w, r, originalURL, http.StatusTemporaryRedirect)
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("%s %s %s", r.RemoteAddr, r.Method, r.URL)
+		next.ServeHTTP(w, r)
+	})
 }
