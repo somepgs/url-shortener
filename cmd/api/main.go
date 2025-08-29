@@ -36,7 +36,7 @@ func main() {
 	}
 
 	defer func() {
-		if cerr := store.Close(); err != nil {
+		if cerr := store.Close(); cerr != nil {
 			log.Printf("Failed to close database: %v", cerr)
 		}
 	}()
@@ -44,8 +44,14 @@ func main() {
 	// Инициализируем service
 	urlService := service.NewUrlService(store)
 
-	// Инициализируем handlers
-	urlHandler := handlers.NewURLHandler(urlService)
+	// Читаем базовый URL из окружения (с дефолтом для dev)
+	baseURL := os.Getenv("BASE_URL")
+	if baseURL == "" {
+		baseURL = "http://localhost:8080"
+	}
+
+	// Инициализируем handlers (передаём baseURL)
+	urlHandler := handlers.NewURLHandler(urlService, baseURL)
 
 	// Настраиваем роутер
 	r := mux.NewRouter()

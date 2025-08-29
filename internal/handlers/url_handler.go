@@ -10,6 +10,7 @@ import (
 
 type URLHandler struct {
 	service *service.UrlService
+	baseURL string
 }
 
 type ShortenRequest struct {
@@ -21,35 +22,32 @@ type ShortenResponse struct {
 	OriginalURL string `json:"original_url"`
 }
 
-func NewURLHandler(service *service.UrlService) *URLHandler {
-	return &URLHandler{service: service}
+func NewURLHandler(service *service.UrlService, baseURL string) *URLHandler {
+	return &URLHandler{service: service, baseURL: baseURL}
 }
 
 func (h *URLHandler) Shorten(w http.ResponseWriter, r *http.Request) {
 	var req ShortenRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "Invalid request")
 		return
 	}
-
 	if req.URL == "" {
-		http.Error(w, "URL is required", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "URL is required")
 		return
 	}
 
-	url, err := h.service.ShortenURL(r.Context(), req.URL)
+	u, err := h.service.ShortenURL(r.Context(), req.URL)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
 	resp := ShortenResponse{
-		ShortURL:    "http://localhost:8080/" + url.ShortCode,
-		OriginalURL: url.OriginalURL,
+		ShortURL:    h.baseURL + "/" + u.ShortCode,
+		OriginalURL: u.OriginalURL,
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	writeJSON(w, http.StatusCreated, resp)
 }
 
 func (h *URLHandler) Redirect(w http.ResponseWriter, r *http.Request) {
@@ -61,6 +59,22 @@ func (h *URLHandler) Redirect(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-
 	http.Redirect(w, r, originalURL, http.StatusTemporaryRedirect)
+}
+
+type errorResponse struct {
+	Error string `json:"error"`
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	err := json.NewEncoder(w).Encode(v)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
+
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, errorResponse{Error: msg})
 }
