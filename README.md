@@ -20,7 +20,7 @@
 
 ### 1) Клонирование
 ```bash
-git clone https://github.com/USER/url-shortener.git
+git clone https://github.com/somepgs/url-shortener.git
 cd url-shortener
 ```
 ### 2) Конфигурация
